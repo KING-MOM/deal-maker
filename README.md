@@ -570,15 +570,25 @@ deal-maker/
 To run tests or contribute:
 
 ```bash
-# Basic smoke test
-node scripts/deal-maker.mjs tactics
-node scripts/deal-maker.mjs sessions
-
-# Create and test a session
-node scripts/deal-maker.mjs new \
-  --name test \
-  --attributes '{"price":{"weight":1,"min":1,"max":100,"anchor":90,"rp":30,"higherIsBetter":false}}'
+# Run the full smoke test suite
+npm test
 ```
+
+### CI
+
+GitHub Actions runs the same smoke test on Node 18/20/22 for every push and PR to `main`.
+
+---
+
+## Production Checklist
+
+Use this to validate a fresh setup before real negotiations:
+
+1. Install Node.js >= 18 and run `node scripts/deal-maker.mjs --help` to confirm CLI works.
+2. Run `npm test` and ensure the smoke test passes locally.
+3. Confirm storage location (default: `scripts/sessions.json` and `scripts/audit.jsonl`) is secure.
+4. Verify your attribute schema (weights > 0, min < max, rp within range).
+5. Run a dry-run accept, then a forced accept to confirm BATNA protection behaves as expected.
 
 ---
 
