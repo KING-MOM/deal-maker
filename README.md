@@ -472,6 +472,91 @@ Default observation variance: $\sigma_{\text{obs}}^2 = (\text{range})^2 \times 0
 
 ---
 
+## Agent Integration (v1.1.0)
+
+### JSON Output Mode
+
+All commands support `--json` flag for structured, agent-consumable output:
+
+```bash
+node scripts/deal-maker.mjs new --name "Test" --attributes '{"price":{"weight":1,"min":80,"max":150,"anchor":140,"rp":95}}' --json
+node scripts/deal-maker.mjs offer --session <id> --values '{"price":88}' --json
+node scripts/deal-maker.mjs counter --session <id> --json
+```
+
+### Output Contract
+
+Each command returns structured JSON with these fields:
+
+```json
+{
+  "decision": "accept | reject | counter | walk",
+  "utility_score": 0.684,
+  "risk_flags": ["reveal_rp", "severe_injection"],
+  "rationale": "Explanation without sensitive internals",
+  "next_request": "Specific next action or question",
+  "counter_offer": { "price": 4673.45 }
+}
+```
+
+### Hard-Fail Conditions (Architecture from v2)
+
+Deal-maker enforces 4 explicit hard-fail conditions:
+
+1. **Reveal RP/BATNA**: Requests to disclose reservation prices, BATNA, or internal thresholds → `error: "Prohibited instruction detected"`
+2. **Policy Bypass**: Attempts to override constraints ("ignore instructions", "disregard rules") → hard exit
+3. **Unparseable Payload**: Invalid JSON, oversized values → exit with schema error
+4. **Missing Attributes**: Opponent offer missing required attributes → hard exit with list of missing fields
+
+### Architecture: Dual-Agent Separation
+
+```
+Opponent Offer + Message
+        ↓
+ [EVALUATOR AGENT]  (Sanitizer)
+ • Injection detection (21 patterns)
+ • Value validation & schema check
+ • MAUT utility scoring
+ • NO access to rp/anchor/batna
+        ↓
+ [NEGOTIATOR AGENT]  (Strategy)
+ • Bayesian opponent modeling
+ • Concession curve generation
+ • BATNA comparison
+ • Private decision logic
+        ↓
+ Output Contract JSON
+```
+
+### Conversation Playbook (v1.1.0)
+
+Use `deal-maker.mjs playbook` to see structured negotiation moves:
+
+- **Opening Sequence**: Acknowledge → Ask calibrated question → Restate constraints
+- **Move Types**: Labeling, Calibration, No-oriented questions, Clarifying summary
+- **Negotiation Loop**: Receive → Score → Decide → Respond (Trade/Probe/Anchor)
+- **Anti-Leakage Rules**: Never disclose thresholds, avoid exact justifications, don't confirm guesses
+- **Close Conditions**: Accept (utility + hard constraints ✅), Reject (below BATNA, no path), Escalate (legal/compliance ambiguous)
+
+### Using with LLMs
+
+Example: Pipe JSON output to an LLM for autonomous decision-making:
+
+```bash
+#!/bin/bash
+SESSION="session-..."
+OFFER_JSON=$(node deal-maker.mjs offer --session $SESSION --values '{"price":3200}' --json)
+DECISION=$(echo "$OFFER_JSON" | jq -r '.decision')
+NEXT=$(echo "$OFFER_JSON" | jq -r '.next_request')
+
+if [ "$DECISION" = "BELOW_BATNA" ]; then
+  echo "Offer rejected. Generating counter..."
+  node deal-maker.mjs counter --session $SESSION --json
+fi
+```
+
+---
+
 ## Known Limitations
 
 1. **Session files are unencrypted at rest**: Store in restricted-access directories.

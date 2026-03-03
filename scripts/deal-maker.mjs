@@ -20,6 +20,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SESSIONS_FILE = join(__dirname, 'sessions.json');
 const AUDIT_FILE    = join(__dirname, 'audit.jsonl');
 
+// ─ JSON OUTPUT MODE (v1.1.0) ─
+let JSON_MODE = false;
+
 // Ensure directory exists on startup (Bug #1 fix)
 mkdirSync(__dirname, { recursive: true });
 
@@ -80,11 +83,19 @@ const INJECTION_PATTERNS = [
   /walk.?away\s+(point|price|threshold)/i,
 ];
 
+// ─ HARD-FAIL PATTERNS (v1.1.0) ─ Trigger immediate exit, not just quarantine
+const HARD_FAIL_PATTERNS = [
+  /reveal\s+(your|the)\s+(minimum|maximum|reservation|batna|walk.?away|constraint|price|anchor|rp)/i,
+  /ignore\s+(previous|prior|all)\s+(instructions?|constraints?|rules?)/i,
+  /override\s+(your|the)\s+(system|instructions?|rules?)/i,
+];
+
 const MAX_MESSAGE_LEN = 2000;
 const MAX_ATTR_VALUE  = 1e9;
+const MAX_VALUES_SIZE = 10_000;
 
 function evaluatorSanitizeMessage(message) {
-  if (!message) return { clean: true, text: '', flags: [] };
+  if (!message) return { clean: true, text: '', flags: [], hard_fail: null };
   let text = String(message).slice(0, MAX_MESSAGE_LEN);
 
   // Sec-1: Normalize Unicode to catch lookalike characters
@@ -93,7 +104,21 @@ function evaluatorSanitizeMessage(message) {
   const flags  = INJECTION_PATTERNS
     .filter(p => p.test(text))
     .map(p => p.source.slice(0, 60));
-  return { clean: flags.length === 0, text, flags };
+
+  // v1.1.0: Check for hard-fail patterns
+  const hard_fail = HARD_FAIL_PATTERNS.find(p => p.test(text));
+
+  return { clean: flags.length === 0, text, flags, hard_fail };
+}
+
+// v1.1.0: Output error and exit (JSON or text)
+function exitWithError(msg, riskFlags = []) {
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ error: msg, risk_flags: riskFlags }, null, 2));
+  } else {
+    console.error(`❌ HARD FAIL: ${msg}`);
+  }
+  process.exit(1);
 }
 
 function evaluatorSanitizeValues(rawValues, attributes) {
@@ -352,6 +377,20 @@ function cmdNew(flags) {
   saveSessions(sessions);
   audit({ event: 'session_created', sessionId: id, name });
 
+  // v1.1.0: JSON output mode
+  if (JSON_MODE) {
+    const result = {
+      session_id: id,
+      name,
+      attributes: Object.keys(attributes),
+      batna_utility: batna,
+      risk_flags: [],
+      next_request: `deal-maker.mjs counter --session ${id}`
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   console.log('\n✅ Negotiation session created');
   console.log(`   ID:          ${id}`);
   console.log(`   Name:        ${name}`);
@@ -368,14 +407,34 @@ function cmdNew(flags) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function cmdSessions() {
-  const sessions = Object.values(loadSessions());
-  if (sessions.length === 0) {
-    console.log('No sessions found. Create one with: deal-maker.mjs new');
+  const allSessions = Object.values(loadSessions());
+  if (allSessions.length === 0) {
+    if (JSON_MODE) {
+      console.log(JSON.stringify({ sessions: [] }, null, 2));
+    } else {
+      console.log('No sessions found. Create one with: deal-maker.mjs new');
+    }
+    return;
+  }
+
+  // v1.1.0: JSON output mode
+  if (JSON_MODE) {
+    const result = {
+      sessions: allSessions.map(s => ({
+        id: s.id,
+        name: s.name,
+        status: s.status,
+        rounds: s.rounds.length,
+        maxRounds: s.config.maxRounds,
+        created: s.created
+      }))
+    };
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
   console.log('\n== Negotiation Sessions ==\n');
-  for (const s of sessions) {
+  for (const s of allSessions) {
     const icon = { active: '🟢', accepted: '✅', walked: '🔴' }[s.status] ?? '⬜';
     console.log(`${icon} [${s.status.toUpperCase()}] ${s.name}`);
     console.log(`   ID:      ${s.id}`);
@@ -410,8 +469,24 @@ function cmdOffer(flags) {
   try { rawValues = JSON.parse(valStr); }
   catch { console.error('Error: --values must be valid JSON'); process.exit(1); }
 
+  // v1.1.0: HARD-FAIL HF-2 — Payload size check
+  if (JSON.stringify(rawValues).length > MAX_VALUES_SIZE) {
+    exitWithError(`Values payload exceeds size limit (${MAX_VALUES_SIZE} bytes)`, ['oversized_payload']);
+  }
+
   // ── EVALUATOR AGENT (Bouncer) ─────────────────────────────────────────
   const sanitizedMsg = evaluatorSanitizeMessage(message);
+
+  // v1.1.0: HARD-FAIL HF-3 — Severe injection pattern (policy override / RP disclosure)
+  if (sanitizedMsg.hard_fail) {
+    exitWithError('Prohibited instruction detected: cannot process this offer', ['severe_injection']);
+  }
+
+  // v1.1.0: HARD-FAIL HF-1 — Missing required attributes
+  const missingAttrs = Object.keys(session.attributes).filter(k => !(k in rawValues));
+  if (missingAttrs.length > 0) {
+    exitWithError(`Missing required offer attributes: ${missingAttrs.join(', ')}`, ['missing_attributes']);
+  }
   if (!sanitizedMsg.clean) {
     console.log('\n🚨 EVALUATOR: Adversarial input detected — message quarantined');
     console.log('   Patterns matched:');
@@ -430,22 +505,25 @@ function cmdOffer(flags) {
   const cleanValues   = evaluatorSanitizeValues(rawValues, evaluatorAttrs);
   const utilityScore  = evaluatorComputeUtility(cleanValues, evaluatorAttrs);
 
-  console.log('\n┌─ EVALUATOR REPORT ' + '─'.repeat(44) + '┐');
-  console.log(`│  Adversarial:  ${sanitizedMsg.clean ? 'none detected' : '⚠️  QUARANTINED'}`);
-  console.log(`│  Values:       ${JSON.stringify(cleanValues)}`);
+  // v1.1.0: In JSON mode, skip the human-readable boxes
+  if (!JSON_MODE) {
+    console.log('\n┌─ EVALUATOR REPORT ' + '─'.repeat(44) + '┐');
+    console.log(`│  Adversarial:  ${sanitizedMsg.clean ? 'none detected' : '⚠️  QUARANTINED'}`);
+    console.log(`│  Values:       ${JSON.stringify(cleanValues)}`);
 
-  // Per-attribute breakdown (Bug #5: removed dead variable u)
-  for (const [key, attr] of Object.entries(evaluatorAttrs)) {
-    const v = cleanValues[key];
-    if (v === undefined) continue;
-    const range = attr.max - attr.min;
-    const norm = Math.max(0, Math.min(1, (v - attr.min) / range));
-    const perAttrUtil = attr.higherIsBetter ? norm : (1 - norm);
-    console.log(`│  ${key.padEnd(12)} value=${String(v).padEnd(8)} u=${perAttrUtil.toFixed(3)}  w=${attr.weight}`);
+    // Per-attribute breakdown (Bug #5: removed dead variable u)
+    for (const [key, attr] of Object.entries(evaluatorAttrs)) {
+      const v = cleanValues[key];
+      if (v === undefined) continue;
+      const range = attr.max - attr.min;
+      const norm = Math.max(0, Math.min(1, (v - attr.min) / range));
+      const perAttrUtil = attr.higherIsBetter ? norm : (1 - norm);
+      console.log(`│  ${key.padEnd(12)} value=${String(v).padEnd(8)} u=${perAttrUtil.toFixed(3)}  w=${attr.weight}`);
+    }
+
+    console.log(`│  Utility score: ${utilityScore.toFixed(4)}`);
+    console.log('└' + '─'.repeat(62) + '┘');
   }
-
-  console.log(`│  Utility score: ${utilityScore.toFixed(4)}`);
-  console.log('└' + '─'.repeat(62) + '┘');
 
   // ── NEGOTIATOR AGENT (Brain) ──────────────────────────────────────────
   // Update Bayesian opponent model
@@ -474,28 +552,48 @@ function cmdOffer(flags) {
   // Desperation assessment
   const desp = negotiatorAssessDesperation(session);
 
-  console.log('\n┌─ NEGOTIATOR DECISION ' + '─'.repeat(40) + '┐');
-  if (belowBatna) {
-    console.log('│  ↓ Utility is below BATNA threshold. Auto-reject recommended.');
-    console.log('│  → Run: deal-maker.mjs counter --session ' + sessionId);
-  } else {
-    console.log('│  ↑ Utility meets BATNA threshold. Offer is acceptable.');
-    console.log('│  → Accept:  deal-maker.mjs accept --session ' + sessionId + ' --yes I_ACCEPT_DEAL');
-    console.log('│  → Counter: deal-maker.mjs counter --session ' + sessionId);
-  }
+  // v1.1.0: Conditional human output
+  if (!JSON_MODE) {
+    console.log('\n┌─ NEGOTIATOR DECISION ' + '─'.repeat(40) + '┐');
+    if (belowBatna) {
+      console.log('│  ↓ Utility is below BATNA threshold. Auto-reject recommended.');
+      console.log('│  → Run: deal-maker.mjs counter --session ' + sessionId);
+    } else {
+      console.log('│  ↑ Utility meets BATNA threshold. Offer is acceptable.');
+      console.log('│  → Accept:  deal-maker.mjs accept --session ' + sessionId + ' --yes I_ACCEPT_DEAL');
+      console.log('│  → Counter: deal-maker.mjs counter --session ' + sessionId);
+    }
 
-  if (desp) {
-    console.log('│');
-    console.log('│  BAYESIAN OPPONENT MODEL:');
-    for (const [key, a] of Object.entries(desp)) {
-      const icon = a.desperation === 'HIGH' ? '🔴' : a.desperation === 'LOW' ? '🟢' : '🟡';
-      console.log(`│  ${icon} ${key.padEnd(12)} est. RP ≈ ${a.priorMean?.toFixed(2).padEnd(8)} desperation: ${a.desperation}`);
-      if (a.desperation === 'HIGH') {
-        console.log('│    ↑ Large concession detected. Consider holding firm.');
+    if (desp) {
+      console.log('│');
+      console.log('│  BAYESIAN OPPONENT MODEL:');
+      for (const [key, a] of Object.entries(desp)) {
+        const icon = a.desperation === 'HIGH' ? '🔴' : a.desperation === 'LOW' ? '🟢' : '🟡';
+        console.log(`│  ${icon} ${key.padEnd(12)} est. RP ≈ ${a.priorMean?.toFixed(2).padEnd(8)} desperation: ${a.desperation}`);
+        if (a.desperation === 'HIGH') {
+          console.log('│    ↑ Large concession detected. Consider holding firm.');
+        }
       }
     }
+    console.log('└' + '─'.repeat(62) + '┘');
+  } else {
+    // v1.1.0: JSON output contract
+    const rationale = belowBatna
+      ? 'Offer utility is below BATNA threshold. Recommend counter or walk.'
+      : 'Offer utility meets or exceeds BATNA threshold. Acceptable.';
+    const result = {
+      decision: decision,
+      utility_score: utilityScore,
+      risk_flags: sanitizedMsg.flags,
+      rationale: rationale,
+      next_request: belowBatna
+        ? `deal-maker.mjs counter --session ${sessionId}`
+        : `deal-maker.mjs accept --session ${sessionId} --yes I_ACCEPT_DEAL`,
+      round: round.round,
+      counter_offer: null
+    };
+    console.log(JSON.stringify(result, null, 2));
   }
-  console.log('└' + '─'.repeat(62) + '┘');
 
   sessions[sessionId] = session;
   saveSessions(sessions);
@@ -551,6 +649,21 @@ function cmdCounter(flags) {
 
   const desp = negotiatorAssessDesperation(session);
 
+  // v1.1.0: JSON output mode
+  if (JSON_MODE) {
+    const result = {
+      decision: "counter",
+      counter_offer: counter,
+      utility_score: myUtil,
+      round: round,
+      risk_flags: [],
+      rationale: "Stochastic counter generated. Gaussian noise applied.",
+      next_request: `deal-maker.mjs offer --session ${sessionId} --values '{...}'`
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   console.log('\n┌─ STOCHASTIC COUNTER-OFFER ' + '─'.repeat(35) + '┐');
   console.log(`│  Round:    ${round} / ${session.config.maxRounds}`);
   console.log(`│  Counter:  ${JSON.stringify(counter)}`);
@@ -584,6 +697,35 @@ function cmdStatus(flags) {
   const sessions = loadSessions();
   const session  = sessions[sessionId];
   if (!session) { console.error('Session not found'); process.exit(1); }
+
+  // v1.1.0: JSON output mode
+  if (JSON_MODE) {
+    // Strip sensitive fields (rp, anchor, beta) from attributes for dual-agent separation
+    const sanitizedAttrs = {};
+    for (const [key, attr] of Object.entries(session.attributes)) {
+      sanitizedAttrs[key] = { weight: attr.weight, min: attr.min, max: attr.max, higherIsBetter: attr.higherIsBetter };
+    }
+    const result = {
+      id: session.id,
+      name: session.name,
+      status: session.status,
+      created: session.created,
+      round: session.rounds.length,
+      maxRounds: session.config.maxRounds,
+      attributes: sanitizedAttrs,
+      opponentPriors: session.opponentPriors,
+      rounds: session.rounds.map(r => ({
+        round: r.round,
+        timestamp: r.timestamp,
+        opponentOffer: r.opponentOffer,
+        utilityScore: r.utilityScore,
+        decision: r.decision,
+        myCounter: r.myCounter
+      }))
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
 
   console.log(`\n== ${session.name} ==`);
   console.log(`   Status:  ${session.status}`);
@@ -627,8 +769,12 @@ function cmdAccept(flags) {
   if (!sessionId) { console.error('Error: --session is required'); process.exit(1); }
 
   if (yes !== 'I_ACCEPT_DEAL') {
-    console.log('⚠️  Dry-run — no changes made.');
-    console.log('   To confirm: deal-maker.mjs accept --session ' + sessionId + ' --yes I_ACCEPT_DEAL');
+    if (JSON_MODE) {
+      console.log(JSON.stringify({ error: 'Dry-run mode', next_request: `deal-maker.mjs accept --session ${sessionId} --yes I_ACCEPT_DEAL` }, null, 2));
+    } else {
+      console.log('⚠️  Dry-run — no changes made.');
+      console.log('   To confirm: deal-maker.mjs accept --session ' + sessionId + ' --yes I_ACCEPT_DEAL');
+    }
     return;
   }
 
@@ -664,6 +810,20 @@ function cmdAccept(flags) {
   saveSessions(sessions);
   audit({ event: 'deal_accepted', sessionId, offer: lastRound.opponentOffer, utility: lastRound.utilityScore });
 
+  // v1.1.0: JSON output mode
+  if (JSON_MODE) {
+    const result = {
+      decision: "accept",
+      utility_score: lastRound.utilityScore,
+      offer: lastRound.opponentOffer,
+      risk_flags: [],
+      rationale: "Deal accepted and session closed.",
+      next_request: null
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   console.log('\n✅ Deal accepted and session closed.');
   console.log(`   Offer:   ${JSON.stringify(lastRound.opponentOffer)}`);
   console.log(`   Utility: ${lastRound.utilityScore?.toFixed(4)}`);
@@ -695,6 +855,18 @@ function cmdWalk(flags) {
   saveSessions(sessions);
   audit({ event: 'walked_away', sessionId, reason });
 
+  // v1.1.0: JSON output mode
+  if (JSON_MODE) {
+    const result = {
+      decision: "walk",
+      reason: reason,
+      risk_flags: [],
+      next_request: null
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   console.log('\n🚶 Walked away. BATNA preserved.');
   console.log(`   Session: ${session.name}`);
   console.log(`   Reason:  ${reason}`);
@@ -705,6 +877,23 @@ function cmdWalk(flags) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function cmdTactics() {
+  if (JSON_MODE) {
+    const result = {
+      sections: [
+        { title: "FM DJ VOICE", items: ["Slow, calm, descending tone for firm points.", "Ascending inflection to invite collaboration.", "Tone changes brain chemistry — reduces opponent cortisol."] },
+        { title: "TACTICAL EMPATHY (Labeling)", items: ["\"It seems like something here feels off to you...\"", "\"It sounds like you're under some internal pressure...\"", "\"It looks like timing is a real concern for you...\"", "→ Label negatives first. Named fears lose their power.", "→ Focus: 70% of decisions are made to avoid loss, not to seek gain."] },
+        { title: "NO-ORIENTED QUESTIONS", items: ["\"Is now a bad time to discuss this?\"", "\"Would it be a bad idea to revisit the terms today?\"", "\"Does this proposal feel like a mistake to you?\"", "→ \"No\" grants security. They open up behind their wall."] },
+        { title: "\"THAT'S RIGHT\" TRIGGER", items: ["Summarize their position with surgical accuracy.", "Apply Tactical Silence — wait for \"That's right.\"", "\"You're right\" ≠ \"That's right.\" Keep listening.", "Silence is a weapon. Let them break it."] },
+        { title: "CALIBRATED QUESTIONS", items: ["\"How am I supposed to work with that figure?\"", "\"What makes this timeline so critical for you?\"", "\"How does this help us both get what we need?\"", "→ Forces them to solve your problem."] },
+        { title: "FRAMING (Bucket Technique)", items: ["Divide complex deals into sub-buckets where both parties can declare a partial win.", "Write their victory speech before they do.", "Never negotiate on a single variable — lock-in at least 3 attributes to enable wise trades."] },
+        { title: "STRATEGIC AMBIGUITY", items: ["Use only when both parties want a deal and need political cover. Never when incentives diverge.", "Imprecise language as a bridge, not a trap."] },
+        { title: "BLACK SWANS", items: ["Listen for what is NOT said.", "Off-hand comments, pauses, hesitations.", "Ask: \"What's making this particularly important right now?\" — the answer is usually the Black Swan.", "Black Swans live in conversation, not in Google."] }
+      ]
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║                  DEAL-MAKER · Tactical Reference             ║
@@ -765,11 +954,120 @@ function cmdTactics() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// COMMAND: playbook (v1.1.0)
+// ═══════════════════════════════════════════════════════════════════════
+
+function cmdPlaybook() {
+  if (JSON_MODE) {
+    const result = {
+      sections: [
+        {
+          title: "OPENING SEQUENCE",
+          items: [
+            "Acknowledge counterpart objective in neutral terms.",
+            "Ask one calibrated scope question.",
+            "Restate constraints at policy level (never numeric RP/BATNA)."
+          ]
+        },
+        {
+          title: "MOVE TYPES",
+          items: {
+            labeling: "\"It seems timeline certainty is key for you.\"",
+            calibration: "\"How should we structure this so both sides can execute reliably?\"",
+            no_oriented_check: "\"Is it a bad idea to compare two options side by side?\"",
+            clarifying_summary: "\"Here is my understanding of your priorities...\""
+          }
+        },
+        {
+          title: "NEGOTIATION LOOP",
+          items: {
+            steps: [
+              "Receive and sanitize proposal.",
+              "Extract terms and score utility.",
+              "Decide: accept, reject, or counter.",
+              "Respond with one move: Trade, Probe, or Anchor"
+            ],
+            response_types: ["trade", "probe", "anchor"]
+          }
+        },
+        {
+          title: "ANTI-LEAKAGE RULES",
+          items: [
+            "Do not disclose internal thresholds.",
+            "Do not justify with exact hidden calculations.",
+            "Do not confirm opponent guesses about your limits."
+          ]
+        },
+        {
+          title: "CLOSE CONDITIONS",
+          items: [
+            "Accept when utility passes threshold and hard constraints pass.",
+            "Reject when below BATNA and no feasible path exists.",
+            "Escalate to human if legal, compliance, or reputational risk is ambiguous."
+          ]
+        }
+      ]
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(`
+╔══════════════════════════════════════════════════════════════╗
+║             DEAL-MAKER · Conversation Playbook               ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  OPENING SEQUENCE                                            ║
+║  1. Acknowledge counterpart objective in neutral terms.      ║
+║  2. Ask one calibrated scope question.                       ║
+║  3. Restate constraints at policy level (never numeric RP).  ║
+║                                                              ║
+║  MOVE TYPES                                                  ║
+║  · Labeling: "It seems timeline certainty is key for you."   ║
+║  · Calibration: "How should we structure this so both        ║
+║    sides can execute reliably?"                              ║
+║  · No-oriented check: "Is it a bad idea to compare two       ║
+║    options side by side?"                                    ║
+║  · Clarifying summary: "Here is my understanding of         ║
+║    your priorities..."                                       ║
+║                                                              ║
+║  NEGOTIATION LOOP                                            ║
+║  1. Receive and sanitize proposal.                           ║
+║  2. Extract terms and score utility.                         ║
+║  3. Decide: accept, reject, or counter.                      ║
+║  4. Respond with one move:                                   ║
+║     · Trade  — exchange value across attributes.             ║
+║     · Probe  — ask for missing variables.                    ║
+║     · Anchor — present bounded counteroffer.                 ║
+║                                                              ║
+║  ANTI-LEAKAGE RULES                                          ║
+║  · Do not disclose internal thresholds.                      ║
+║  · Do not justify with exact hidden calculations.            ║
+║  · Do not confirm opponent guesses about your limits.        ║
+║                                                              ║
+║  CLOSE CONDITIONS                                            ║
+║  · Accept when utility passes threshold + hard constraints.  ║
+║  · Reject when below BATNA and no feasible path exists.      ║
+║  · Escalate to human if legal, compliance, or reputational   ║
+║    risk is ambiguous.                                        ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════
 
 const cmd   = process.argv[2];
-const flags = parseArgs(process.argv.slice(3));
+const allFlags = parseArgs(process.argv.slice(3));
+
+// v1.1.0: Parse --json flag separately
+JSON_MODE = allFlags.json === true;
+const flags = {};
+for (const [k, v] of Object.entries(allFlags)) {
+  if (k !== 'json') flags[k] = v;
+}
 
 const COMMANDS = {
   new:      () => cmdNew(flags),
@@ -780,6 +1078,7 @@ const COMMANDS = {
   accept:   () => cmdAccept(flags),
   walk:     () => cmdWalk(flags),
   tactics:  () => cmdTactics(),
+  playbook: () => cmdPlaybook(),
 };
 
 if (!cmd || !COMMANDS[cmd]) {
@@ -795,6 +1094,10 @@ if (!cmd || !COMMANDS[cmd]) {
     '  accept     Accept the last opponent offer  (--yes I_ACCEPT_DEAL)',
     '  walk       Walk away from negotiation',
     '  tactics    Print tactical reference cheat-sheet',
+    '  playbook   Print conversation playbook',
+    '',
+    'Options:',
+    '  --json     Output structured JSON (agent mode)',
     '',
   ].join('\n'));
   process.exit(cmd ? 1 : 0);

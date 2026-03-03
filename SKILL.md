@@ -169,6 +169,35 @@ Topics: FM DJ voice, tactical empathy, no-oriented questions, "That's right" tri
 
 ---
 
+### `playbook` — Print conversation playbook (v1.1.0)
+
+```bash
+node {baseDir}/scripts/deal-maker.mjs playbook [--json]
+```
+
+Structured negotiation moves: Opening Sequence, Move Types (Labeling, Calibration, No-oriented checks, Clarifying summaries), Negotiation Loop, Anti-Leakage Rules, Close Conditions.
+
+---
+
+## Output Contract (v1.1.0)
+
+All commands support `--json` flag for agent-consumable output:
+
+```json
+{
+  "decision": "accept | reject | counter | walk",
+  "utility_score": 0.684,
+  "risk_flags": ["pattern_name"],
+  "rationale": "Explanation without sensitive internals",
+  "next_request": "Specific next action",
+  "counter_offer": { "attribute": value }
+}
+```
+
+Example: `node {baseDir}/scripts/deal-maker.mjs offer --session <id> --values '{"price":88}' --json`
+
+---
+
 ## Mathematical Foundation
 
 ### MAUT Utility

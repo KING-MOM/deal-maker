@@ -1,0 +1,24 @@
+interface:
+  display_name: "Deal Maker"
+  short_description: "Executable AI negotiation engine — MAUT scoring, Bayesian opponent modeling, BATNA protection, JSON output."
+  default_prompt: "Use this skill to run secure, utility-driven negotiations with dual-agent separation, hard-fail safety controls, and structured JSON output."
+
+agent:
+  version: "1.1.0"
+  runtime: "node>=18"
+  entry: "scripts/deal-maker.mjs"
+  json_output_flag: "--json"
+  hard_fail_conditions:
+    - reveal_rp_batna
+    - bypass_policy
+    - unparseable_payload
+    - missing_required_attributes
+  security:
+    evaluator_negotiator_separation: true
+    log_injection_flags: true
+    redact_internals_from_rationale: true
+    json_output_mode: true
+  output_contract:
+    fields: [decision, counter_offer, utility_score, rationale, risk_flags, next_request]
+  minimum_evaluation_schema:
+    fields: [offer_id, round, attributes, sanitization_flags, utility_score]
