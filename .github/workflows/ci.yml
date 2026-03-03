@@ -20,17 +20,5 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
-      - name: Run tactics command
-        run: node scripts/deal-maker.mjs tactics
-
-      - name: List sessions (should be empty)
-        run: node scripts/deal-maker.mjs sessions
-
-      - name: Test new session creation
-        run: |
-          node scripts/deal-maker.mjs new \
-            --name "CI Test Session" \
-            --attributes '{"price":{"weight":1,"min":1,"max":100,"anchor":90,"rp":30,"higherIsBetter":false}}'
-
-      - name: Test sessions listing
-        run: node scripts/deal-maker.mjs sessions
+      - name: Run smoke tests
+        run: npm test

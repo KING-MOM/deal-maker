@@ -641,7 +641,7 @@ function cmdAccept(flags) {
   if (!lastRound?.opponentOffer) { console.error('No opponent offer to accept yet.'); process.exit(1); }
 
   // Bug #3: Check BATNA threshold
-  if (lastRound.decision === 'BELOW_BATNA') {
+  if (lastRound.decision === 'BELOW_BATNA' && !forceBelowBatna) {
     console.error('❌ ERROR: The last offer is BELOW your BATNA threshold.');
     console.error(`   Utility: ${lastRound.utilityScore?.toFixed(4)} < BATNA: ${session.batnaThreshold.toFixed(4)}`);
     console.error('');

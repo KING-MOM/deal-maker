@@ -68,7 +68,7 @@ Each negotiation dimension:
 ### `new` — Create a negotiation session
 
 ```bash
-deal-maker.mjs new \
+node {baseDir}/scripts/deal-maker.mjs new \
   --name "Session Name" \
   --attributes '<JSON>' \
   [--max-rounds <int>] \
@@ -87,7 +87,7 @@ deal-maker.mjs new \
 ### `counter` — Generate your counter-offer
 
 ```bash
-deal-maker.mjs counter --session <id>
+node {baseDir}/scripts/deal-maker.mjs counter --session <id>
 ```
 
 Follows your concession curve but adds Gaussian noise so opponent cannot reverse-engineer your strategy.
@@ -97,7 +97,7 @@ Follows your concession curve but adds Gaussian noise so opponent cannot reverse
 ### `offer` — Submit an opponent offer
 
 ```bash
-deal-maker.mjs offer \
+node {baseDir}/scripts/deal-maker.mjs offer \
   --session <id> \
   --values '<JSON>' \
   [--message "<text>"]
@@ -116,7 +116,7 @@ deal-maker.mjs offer \
 ### `status` — Show session state
 
 ```bash
-deal-maker.mjs status [--session <id>]
+node {baseDir}/scripts/deal-maker.mjs status [--session <id>]
 ```
 
 - Without `--session`: Lists all sessions.
@@ -127,7 +127,7 @@ deal-maker.mjs status [--session <id>]
 ### `sessions` — List all sessions
 
 ```bash
-deal-maker.mjs sessions
+node {baseDir}/scripts/deal-maker.mjs sessions
 ```
 
 ---
@@ -136,13 +136,13 @@ deal-maker.mjs sessions
 
 ```bash
 # Dry-run
-deal-maker.mjs accept --session <id>
+node {baseDir}/scripts/deal-maker.mjs accept --session <id>
 
 # Confirm
-deal-maker.mjs accept --session <id> --yes I_ACCEPT_DEAL
+node {baseDir}/scripts/deal-maker.mjs accept --session <id> --yes I_ACCEPT_DEAL
 
 # Force if below BATNA (not recommended)
-deal-maker.mjs accept --session <id> --yes I_ACCEPT_DEAL --force-below-batna
+node {baseDir}/scripts/deal-maker.mjs accept --session <id> --yes I_ACCEPT_DEAL --force-below-batna
 ```
 
 **Safety**: If last offer is below BATNA, system rejects unless you add `--force-below-batna`.
@@ -152,7 +152,7 @@ deal-maker.mjs accept --session <id> --yes I_ACCEPT_DEAL --force-below-batna
 ### `walk` — Walk away and close session
 
 ```bash
-deal-maker.mjs walk --session <id> [--reason "<reason>"]
+node {baseDir}/scripts/deal-maker.mjs walk --session <id> [--reason "<reason>"]
 ```
 
 Your BATNA is preserved. Session marked as `walked` (irreversible).
@@ -162,7 +162,7 @@ Your BATNA is preserved. Session marked as `walked` (irreversible).
 ### `tactics` — Print tactical reference
 
 ```bash
-deal-maker.mjs tactics
+node {baseDir}/scripts/deal-maker.mjs tactics
 ```
 
 Topics: FM DJ voice, tactical empathy, no-oriented questions, "That's right" trigger, calibrated questions, framing, strategic ambiguity, Black Swans.

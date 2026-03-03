@@ -8,7 +8,7 @@
     "deal-maker": "scripts/deal-maker.mjs"
   },
   "scripts": {
-    "test": "node scripts/deal-maker.mjs tactics && node scripts/deal-maker.mjs sessions"
+    "test": "node scripts/smoke-test.mjs"
   },
   "keywords": [
     "negotiation",
