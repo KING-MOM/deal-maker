@@ -20,13 +20,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SESSIONS_FILE = join(__dirname, 'sessions.json');
 const AUDIT_FILE    = join(__dirname, 'audit.jsonl');
 
+// Ensure directory exists on startup (Bug #1 fix)
+mkdirSync(__dirname, { recursive: true });
+
 // ═══════════════════════════════════════════════════════════════════════
 // STATE MANAGEMENT  (The Ledger)
 // ═══════════════════════════════════════════════════════════════════════
 
 function loadSessions() {
   if (!existsSync(SESSIONS_FILE)) return {};
-  return JSON.parse(readFileSync(SESSIONS_FILE, 'utf8'));
+  try {
+    return JSON.parse(readFileSync(SESSIONS_FILE, 'utf8'));
+  } catch (err) {
+    console.error(`⚠️  Warning: sessions.json is corrupted (${err.message})`);
+    console.error('   Falling back to empty sessions {}');
+    console.error('   You may need to recover from audit.jsonl or backup');
+    return {};
+  }
 }
 
 function saveSessions(sessions) {
@@ -46,8 +56,8 @@ function audit(event) {
 
 const INJECTION_PATTERNS = [
   /ignore\s+(previous|prior|all)\s+(instructions?|constraints?|rules?)/i,
-  /reveal\s+(your|the)\s+(minimum|maximum|reservation|batna|walk.?away|constraint|price)/i,
-  /output\s+your\s+(absolute|true|real|actual)/i,
+  /reveal\s+(your|the)\s+(minimum|maximum|reservation|batna|walk.?away|constraint|price|anchor|rp)/i,
+  /output\s+your\s+(absolute|true|real|actual|private|hidden|secret)/i,
   /system\s+prompt/i,
   /test\s+environment/i,
   /simulation\s+mode/i,
@@ -62,6 +72,12 @@ const INJECTION_PATTERNS = [
   /jailbreak/i,
   /DAN\s+mode/i,
   /pretend\s+(you\s+have\s+no|there\s+(are\s+)?no)\s+(rules?|limits?|constraints?)/i,
+  // Sec-1: Additional patterns for common bypasses
+  /(expose|show|print|display|tell|share|give\s+(me|us))\s+(your|the)\s+(minimum|maximum|reservation|constraint|price|anchor|rp|walk.?away|batna)/i,
+  /what\s+is\s+(your|the)\s+(minimum|maximum|reservation|constraint|price|anchor|rp|walk.?away|batna)/i,
+  /what\s+would\s+(you|i)\s+accept/i,
+  /lowest\s+(price|offer|number)/i,
+  /walk.?away\s+(point|price|threshold)/i,
 ];
 
 const MAX_MESSAGE_LEN = 2000;
@@ -69,7 +85,11 @@ const MAX_ATTR_VALUE  = 1e9;
 
 function evaluatorSanitizeMessage(message) {
   if (!message) return { clean: true, text: '', flags: [] };
-  const text   = String(message).slice(0, MAX_MESSAGE_LEN);
+  let text = String(message).slice(0, MAX_MESSAGE_LEN);
+
+  // Sec-1: Normalize Unicode to catch lookalike characters
+  text = text.normalize('NFKC');
+
   const flags  = INJECTION_PATTERNS
     .filter(p => p.test(text))
     .map(p => p.source.slice(0, 60));
@@ -191,7 +211,7 @@ function negotiatorUpdateBayesian(prior, offerValue, attr) {
   const K       = variance / (variance + obsVar);  // Kalman gain
   return {
     mean:     mean + K * (offerValue - mean),
-    variance: (1 - K) * variance,
+    variance: Math.max((1 - K) * variance, 1e-6),  // Bug #7: floor variance to prevent freezing
   };
 }
 
@@ -264,7 +284,7 @@ function parseArgs(argv) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function cmdNew(flags) {
-  const { name, attributes: attrStr, 'max-rounds': maxRoundsRaw = 10, sigma = 0.03 } = flags;
+  const { name, attributes: attrStr, 'max-rounds': maxRoundsRaw = 10, sigma: sigmaRaw = 0.03 } = flags;
 
   if (!name || !attrStr) {
     console.error('Error: --name and --attributes are required');
@@ -275,6 +295,19 @@ function cmdNew(flags) {
   try { attributes = JSON.parse(attrStr); }
   catch { console.error('Error: --attributes must be valid JSON'); process.exit(1); }
 
+  // Bug #6: Validate numeric parameters
+  const maxRounds = parseInt(maxRoundsRaw, 10);
+  const sigma = parseFloat(sigmaRaw);
+
+  if (!Number.isFinite(maxRounds) || maxRounds <= 0) {
+    console.error(`Error: --max-rounds must be a positive integer (got "${maxRoundsRaw}")`);
+    process.exit(1);
+  }
+  if (!Number.isFinite(sigma) || sigma < 0 || sigma > 1) {
+    console.error(`Error: --sigma must be a number in [0, 1] (got "${sigmaRaw}")`);
+    process.exit(1);
+  }
+
   // Validate
   for (const [key, attr] of Object.entries(attributes)) {
     const missing = ['weight', 'min', 'max', 'anchor', 'rp'].filter(f => attr[f] === undefined);
@@ -284,6 +317,10 @@ function cmdNew(flags) {
     }
     if (attr.min >= attr.max) {
       console.error(`Error: attribute "${key}" — min must be less than max`);
+      process.exit(1);
+    }
+    if (attr.weight <= 0) {
+      console.error(`Error: attribute "${key}" — weight must be positive`);
       process.exit(1);
     }
   }
@@ -303,7 +340,7 @@ function cmdNew(flags) {
     name,
     created: new Date().toISOString(),
     status: 'active',
-    config: { maxRounds: parseInt(maxRoundsRaw), noiseSigma: parseFloat(sigma) },
+    config: { maxRounds, noiseSigma: sigma },
     attributes,
     opponentPriors,
     batnaThreshold: batna,
@@ -319,9 +356,10 @@ function cmdNew(flags) {
   console.log(`   ID:          ${id}`);
   console.log(`   Name:        ${name}`);
   console.log(`   Attributes:  ${Object.keys(attributes).join(', ')}`);
-  console.log(`   Max rounds:  ${maxRoundsRaw}`);
+  console.log(`   Max rounds:  ${maxRounds}`);
   console.log(`   BATNA util:  ${batna.toFixed(4)}  (private — never disclosed to opponent)`);
-  console.log(`\n   Next step — generate your opening anchor:`);
+  console.log(`\n   ⚠️  Note: sessions.json and audit.jsonl are stored in ${__dirname} unencrypted`);
+  console.log(`   Next step — generate your opening anchor:`);
   console.log(`   deal-maker.mjs counter --session ${id}`);
 }
 
@@ -396,14 +434,14 @@ function cmdOffer(flags) {
   console.log(`│  Adversarial:  ${sanitizedMsg.clean ? 'none detected' : '⚠️  QUARANTINED'}`);
   console.log(`│  Values:       ${JSON.stringify(cleanValues)}`);
 
-  // Per-attribute breakdown
+  // Per-attribute breakdown (Bug #5: removed dead variable u)
   for (const [key, attr] of Object.entries(evaluatorAttrs)) {
     const v = cleanValues[key];
     if (v === undefined) continue;
     const range = attr.max - attr.min;
-    let norm = Math.max(0, Math.min(1, (v - attr.min) / range));
-    const u  = (attr.higherIsBetter ? norm : (1 - norm)) * attr.weight / 1; // unweighted display
-    console.log(`│  ${key.padEnd(12)} value=${String(v).padEnd(8)} u=${(attr.higherIsBetter ? norm : (1 - norm)).toFixed(3)}  w=${attr.weight}`);
+    const norm = Math.max(0, Math.min(1, (v - attr.min) / range));
+    const perAttrUtil = attr.higherIsBetter ? norm : (1 - norm);
+    console.log(`│  ${key.padEnd(12)} value=${String(v).padEnd(8)} u=${perAttrUtil.toFixed(3)}  w=${attr.weight}`);
   }
 
   console.log(`│  Utility score: ${utilityScore.toFixed(4)}`);
@@ -479,13 +517,32 @@ function cmdCounter(flags) {
 
   const round   = session.rounds.length + 1;
   const counter = negotiatorGenerateCounter(session);
-  const myUtil  = evaluatorComputeUtility(counter, session.attributes);
 
-  // Attach counter to last round
+  // Bug #8: Pass sanitized attributes (without rp, anchor, beta) to evaluator
+  const evaluatorAttrs = {};
+  for (const [key, attr] of Object.entries(session.attributes)) {
+    evaluatorAttrs[key] = { weight: attr.weight, min: attr.min, max: attr.max, higherIsBetter: attr.higherIsBetter ?? false };
+  }
+  const myUtil  = evaluatorComputeUtility(counter, evaluatorAttrs);
+
+  // Bug #4: Persist counter on round 1
   if (session.rounds.length > 0) {
     const last = session.rounds.at(-1);
     last.myCounter        = counter;
     last.myCounterUtility = myUtil;
+  } else {
+    // Round 1: create a new round record for the opening anchor
+    const newRound = {
+      round: 1,
+      timestamp: new Date().toISOString(),
+      opponentOffer: null,
+      adversarialDetected: false,
+      utilityScore: null,
+      decision: 'OPENING_ANCHOR',
+      myCounter: counter,
+      myCounterUtility: myUtil,
+    };
+    session.rounds.push(newRound);
   }
 
   sessions[sessionId] = session;
@@ -566,7 +623,7 @@ function cmdStatus(flags) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function cmdAccept(flags) {
-  const { session: sessionId, yes } = flags;
+  const { session: sessionId, yes, 'force-below-batna': forceBelowBatna } = flags;
   if (!sessionId) { console.error('Error: --session is required'); process.exit(1); }
 
   if (yes !== 'I_ACCEPT_DEAL') {
@@ -582,6 +639,21 @@ function cmdAccept(flags) {
 
   const lastRound = session.rounds.at(-1);
   if (!lastRound?.opponentOffer) { console.error('No opponent offer to accept yet.'); process.exit(1); }
+
+  // Bug #3: Check BATNA threshold
+  if (lastRound.decision === 'BELOW_BATNA') {
+    console.error('❌ ERROR: The last offer is BELOW your BATNA threshold.');
+    console.error(`   Utility: ${lastRound.utilityScore?.toFixed(4)} < BATNA: ${session.batnaThreshold.toFixed(4)}`);
+    console.error('');
+    console.error('   To accept anyway (not recommended): add --force-below-batna');
+    console.error(`   deal-maker.mjs accept --session ${sessionId} --yes I_ACCEPT_DEAL --force-below-batna`);
+    process.exit(1);
+  }
+
+  if (forceBelowBatna && lastRound.decision === 'BELOW_BATNA') {
+    console.warn('\n⚠️  WARNING: Accepting an offer below BATNA. This is generally not recommended.');
+    console.warn('   Consider walking away instead: deal-maker.mjs walk --session ' + sessionId);
+  }
 
   session.status          = 'accepted';
   session.acceptedOffer   = lastRound.opponentOffer;
@@ -602,8 +674,13 @@ function cmdAccept(flags) {
 // ═══════════════════════════════════════════════════════════════════════
 
 function cmdWalk(flags) {
-  const { session: sessionId, reason = 'No reason given' } = flags;
+  let { session: sessionId, reason = 'No reason given' } = flags;
   if (!sessionId) { console.error('Error: --session is required'); process.exit(1); }
+
+  // Bug #9: Sanitize walkReason (truncate and escape control chars)
+  reason = String(reason)
+    .slice(0, 500)  // Truncate to 500 chars
+    .replace(/[\x00-\x1f]/g, '?');  // Replace control chars
 
   const sessions = loadSessions();
   const session  = sessions[sessionId];

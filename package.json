@@ -1,0 +1,32 @@
+{
+  "name": "deal-maker",
+  "version": "1.0.0",
+  "description": "AI negotiation engine with stochastic concessions, Bayesian opponent modeling, MAUT deal scoring, and prompt-injection defense",
+  "type": "module",
+  "main": "scripts/deal-maker.mjs",
+  "bin": {
+    "deal-maker": "scripts/deal-maker.mjs"
+  },
+  "scripts": {
+    "test": "node scripts/deal-maker.mjs tactics && node scripts/deal-maker.mjs sessions"
+  },
+  "keywords": [
+    "negotiation",
+    "game-theory",
+    "maut",
+    "bayesian",
+    "ai",
+    "deal-making",
+    "multi-attribute-utility"
+  ],
+  "author": "KING-MOM",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KING-MOM/deal-maker.git"
+  },
+  "homepage": "https://github.com/KING-MOM/deal-maker#readme"
+}

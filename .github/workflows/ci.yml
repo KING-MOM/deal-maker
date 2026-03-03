@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run tactics command
+        run: node scripts/deal-maker.mjs tactics
+
+      - name: List sessions (should be empty)
+        run: node scripts/deal-maker.mjs sessions
+
+      - name: Test new session creation
+        run: |
+          node scripts/deal-maker.mjs new \
+            --name "CI Test Session" \
+            --attributes '{"price":{"weight":1,"min":1,"max":100,"anchor":90,"rp":30,"higherIsBetter":false}}'
+
+      - name: Test sessions listing
+        run: node scripts/deal-maker.mjs sessions

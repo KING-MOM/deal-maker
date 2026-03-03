@@ -1,0 +1,21 @@
+# Session and audit data (sensitive - contains reservation prices)
+scripts/sessions.json
+scripts/audit.jsonl
+
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.env
+.env.local
